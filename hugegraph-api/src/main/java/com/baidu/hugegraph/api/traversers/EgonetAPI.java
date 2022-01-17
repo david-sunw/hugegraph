@@ -22,9 +22,9 @@ package com.baidu.hugegraph.api.traversers;
 import static com.baidu.hugegraph.traversal.algorithm.HugeTraverser.DEFAULT_ELEMENTS_LIMIT;
 import static com.baidu.hugegraph.traversal.algorithm.HugeTraverser.DEFAULT_MAX_DEGREE;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Iterator;
-import java.util.List;
 import java.util.Set;
 
 import javax.inject.Singleton;
@@ -48,7 +48,6 @@ import com.baidu.hugegraph.api.graph.VertexAPI;
 import com.baidu.hugegraph.backend.id.Id;
 import com.baidu.hugegraph.backend.query.QueryResults;
 import com.baidu.hugegraph.core.GraphManager;
-import com.baidu.hugegraph.server.RestServer;
 import com.baidu.hugegraph.structure.HugeVertex;
 import com.baidu.hugegraph.traversal.algorithm.HugeTraverser;
 import com.baidu.hugegraph.traversal.algorithm.KneighborTraverser;
@@ -59,13 +58,13 @@ import com.baidu.hugegraph.util.E;
 import com.baidu.hugegraph.util.Log;
 import com.codahale.metrics.annotation.Timed;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 
-@Path("graphs/{graph}/traversers/kneighbor")
+@Path("graphs/{graph}/traversers/egonet")
 @Singleton
-public class KneighborAPI extends TraverserAPI {
+public class EgonetAPI extends TraverserAPI {
 
-    private static final Logger LOG = Log.logger(RestServer.class);
+    private static final Logger LOG = Log.logger(EgonetAPI.class);
 
     @GET
     @Timed
@@ -80,12 +79,10 @@ public class KneighborAPI extends TraverserAPI {
                       @DefaultValue(DEFAULT_MAX_DEGREE) long maxDegree,
                       @QueryParam("limit")
                       @DefaultValue(DEFAULT_ELEMENTS_LIMIT) long limit) {
-        LOG.debug("Graph [{}] get k-neighbor from '{}' with " +
-                  "direction '{}', edge label '{}', max depth '{}', " +
-                  "max degree '{}' and limit '{}'",
-                  graph, sourceV, direction, edgeLabel, depth,
+        LOG.debug("Graph [{}] get egonet from '{}' with direction '{}', " +
+                  "edge label '{}', max depth '{}', max degree '{}' and " +
+                  "limit '{}'", graph, sourceV, direction, edgeLabel, depth,
                   maxDegree, limit);
-        DebugMeasure measure = new DebugMeasure();
 
         Id source = VertexAPI.checkAndParseVertexId(sourceV);
         Directions dir = Directions.convert(EdgeAPI.parseDirection(direction));
@@ -96,11 +93,8 @@ public class KneighborAPI extends TraverserAPI {
         try (KneighborTraverser traverser = new KneighborTraverser(g)) {
             ids = traverser.kneighbor(source, dir, edgeLabel,
                                       depth, maxDegree, limit);
-            measure.addIterCount(1 + traverser.vertexIterCounter,
-                                 traverser.edgeIterCounter);
         }
-        return manager.serializer(g, measure.getResult())
-                      .writeList("vertices", ids);
+        return manager.serializer(g).writeList("vertices", ids);
     }
 
     @POST
@@ -110,11 +104,11 @@ public class KneighborAPI extends TraverserAPI {
     public String post(@Context GraphManager manager,
                        @PathParam("graph") String graph,
                        Request request) {
-        DebugMeasure measure = new DebugMeasure();
-
         E.checkArgumentNotNull(request, "The request body can't be null");
-        E.checkArgumentNotNull(request.source,
-                               "The source of request can't be null");
+        E.checkArgumentNotNull(request.sources,
+                               "The sources of request can't be null");
+        E.checkArgument(request.sources.size() > 0,
+                        "The sources of request can't be empty");
         E.checkArgument(request.steps != null,
                         "The steps of request can't be null");
         if (request.countOnly) {
@@ -122,33 +116,36 @@ public class KneighborAPI extends TraverserAPI {
                             "Can't return vertex or path when count only");
         }
 
-        LOG.debug("Graph [{}] get customized kneighbor from source vertex " +
-                  "'{}', with steps '{}', limit '{}', count_only '{}', " +
+        LOG.debug("Graph [{}] get egonet from source vertex '{}', " +
+                  "with steps '{}', limit '{}', count_only '{}', " +
                   "with_vertex '{}', with_path '{}' and with_edge '{}'",
-                  graph, request.source, request.steps, request.limit,
+                  graph, request.sources, request.steps, request.limit,
                   request.countOnly, request.withVertex, request.withPath,
                   request.withEdge);
 
         HugeGraph g = graph(manager, graph);
-        Id sourceId = HugeVertex.getIdValue(request.source);
+        Set<Id> sourcesId = new HashSet<>(8 * request.sources.size());
+        for (Object source : request.sources) {
+            sourcesId.add(HugeVertex.getIdValue(source));
+        }
+
         Steps steps = steps(g, request.steps);
 
         KneighborRecords results;
         try (KneighborTraverser traverser = new KneighborTraverser(g)) {
-            results = traverser.customizedKneighbor(sourceId, steps,
-                                                    request.maxDepth,
-                                                    request.limit,
-                                                    request.withEdge);
-            measure.addIterCount(1 + traverser.vertexIterCounter,
-                                 traverser.edgeIterCounter);
+            results = traverser.multiKneighbors(sourcesId, steps,
+                                                request.maxDepth,
+                                                request.limit,
+                                                request.withEdge);
         }
 
-        long size = results.size();
+        Set<Id> neighbors = request.countOnly ?
+                            ImmutableSet.of() : results.idSet(request.limit);
+        neighbors.addAll(sourcesId);
+        long size = neighbors.size();
         if (size > request.limit) {
             size = request.limit;
         }
-        List<Id> neighbors = request.countOnly ?
-                             ImmutableList.of() : results.ids(request.limit);
 
         HugeTraverser.PathSet paths = new HugeTraverser.PathSet();
         if (request.withPath) {
@@ -166,7 +163,6 @@ public class KneighborAPI extends TraverserAPI {
             }
             if (!ids.isEmpty()) {
                 verticesIter = g.vertices(ids.toArray());
-                measure.addIterCount(ids.size(), 0);
             }
         }
 
@@ -176,22 +172,23 @@ public class KneighborAPI extends TraverserAPI {
                 Set<Id> ids = results.getEdgeIds();
                 if (!ids.isEmpty()) {
                     edges = g.edges(ids.toArray());
-                    measure.addIterCount(0, ids.size());
                 }
             }
             if (edges != null) {
                 edgesIter = edges;
             }
         }
-        return manager.serializer(g, measure.getResult())
-                      .writeNodesWithPath("kneighbor", neighbors, size,
-                                          paths, verticesIter, edgesIter, null);
+
+        return manager.serializer(g)
+                      .writeNodesWithPath("egonet", new ArrayList<>(neighbors),
+                                          size, paths, verticesIter, edgesIter,
+                                          null);
     }
 
     private static class Request {
 
-        @JsonProperty("source")
-        public Object source;
+        @JsonProperty("sources")
+        public Set<Object> sources;
         @JsonProperty("steps")
         public VESteps steps;
         @JsonProperty("max_depth")
@@ -212,8 +209,8 @@ public class KneighborAPI extends TraverserAPI {
             return String.format("PathRequest{source=%s,steps=%s," +
                                  "maxDepth=%s,limit=%s,countOnly=%s," +
                                  "withVertex=%s,withPath=%s,withEdge=%s}",
-                                 this.source, this.steps, this.maxDepth,
-                                 this.limit,this.countOnly, this.withVertex,
+                                 this.sources, this.steps, this.maxDepth,
+                                 this.limit, this.countOnly, this.withVertex,
                                  this.withPath, this.withEdge);
         }
     }

@@ -107,7 +107,7 @@ public abstract class Condition {
             assert v2 != null;
             /*
              * TODO: we still have no way to determine accurately, since
-             * some backends may scan with token(column) like cassandra.
+             *       some backends may scan with token(column) like cassandra.
              */
             return true;
         });
@@ -658,7 +658,7 @@ public abstract class Condition {
     public static class UserpropRelation extends Relation {
 
         // Id of property key
-        private Id key;
+        private final Id key;
 
         public UserpropRelation(Id key, Object value) {
             this(key, RelationType.EQ, value);
